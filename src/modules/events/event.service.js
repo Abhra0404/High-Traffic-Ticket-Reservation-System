@@ -51,7 +51,6 @@ export async function getEventSeats(eventId) {
       seatNumber: seats.seatNumber,
       price: eventSeats.price,
       status: eventSeats.status,
-      holdExpiresAt: eventSeats.holdExpiresAt,
     })
     .from(eventSeats)
     .innerJoin(

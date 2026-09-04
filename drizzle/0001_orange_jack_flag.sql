@@ -1,0 +1,1 @@
+ALTER TABLE "event_seats" DROP COLUMN "hold_expires_at";

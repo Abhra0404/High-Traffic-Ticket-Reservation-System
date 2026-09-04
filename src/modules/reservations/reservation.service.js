@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { db } from "../../db/index.js";
 import {
@@ -6,11 +6,16 @@ import {
   reservations,
 } from "../../db/schema.js";
 
+import {
+  scheduleReservationExpiration,
+} from "../../queues/reservation.queue.js";
+
 export async function createReservation({
   userId,
   eventSeatId,
 }) {
-  return db.transaction(async (tx) => {
+  const reservation = await db.transaction(async (tx) => {
+
     // 1. Lock the event seat row
     const seatResult = await tx
       .select()
@@ -29,30 +34,37 @@ export async function createReservation({
       throw new Error("Seat is not available");
     }
 
-    const holdExpiresAt = new Date(
+    const expiresAt = new Date(
       Date.now() + 10 * 60 * 1000
     );
 
-    // 3. Mark the seat as held
+    // 3. Mark seat as held
     await tx
       .update(eventSeats)
       .set({
         status: "HELD",
-        holdExpiresAt,
       })
       .where(eq(eventSeats.id, eventSeatId));
 
-    // 4. Create the reservation
+    // 4. Create reservation
     const [reservation] = await tx
       .insert(reservations)
       .values({
         userId,
         eventSeatId,
         status: "PENDING",
-        expiresAt: holdExpiresAt,
+        expiresAt,
       })
       .returning();
 
     return reservation;
   });
+
+  // 5. Schedule expiration AFTER transaction succeeds
+  await scheduleReservationExpiration(
+    reservation.id,
+    reservation.expiresAt
+  );
+
+  return reservation;
 }

@@ -135,8 +135,6 @@ export const eventSeats = pgTable(
       .default("AVAILABLE")
       .notNull(),
 
-    holdExpiresAt: timestamp("hold_expires_at"),
-
     createdAt: timestamp("created_at")
       .defaultNow()
       .notNull(),

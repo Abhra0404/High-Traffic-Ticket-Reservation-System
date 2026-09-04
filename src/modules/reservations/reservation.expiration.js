@@ -37,8 +37,7 @@ export async function expireReservations() {
       await tx
         .update(eventSeats)
         .set({
-          status: "AVAILABLE",
-          holdExpiresAt: null,
+          status: "AVAILABLE"
         })
         .where(
           eq(eventSeats.id, reservation.eventSeatId)
