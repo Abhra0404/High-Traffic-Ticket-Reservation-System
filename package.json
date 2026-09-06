@@ -10,6 +10,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:seed": "node src/db/seed.js",
+    "outbox": "node src/outbox/outbox.publisher.js",
     "test": "vitest"
   },
   "keywords": [],

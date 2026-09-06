@@ -178,3 +178,15 @@ export const reservations = pgTable("reservations", {
     .defaultNow()
     .notNull(),
 });
+
+export const outboxEvents = pgTable("outbox_events", {
+  id: uuid("id").defaultRandom().primaryKey(),
+
+  type: varchar("type", { length: 100 }).notNull(),
+
+  payload: varchar("payload", { length: 1000 }).notNull(),
+
+  processedAt: timestamp("processed_at"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
