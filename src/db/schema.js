@@ -1,91 +1,224 @@
-import "dotenv/config";
+import {
+  pgTable,
+  uuid,
+  varchar,
+  integer,
+  timestamp,
+  pgEnum,
+  unique,
+} from "drizzle-orm/pg-core";
 
-import { and, eq, isNull, lt, or } from "drizzle-orm";
+/* ----------------------------- Enums ----------------------------- */
 
-import { db } from "../db/index.js";
-import { outboxEvents } from "../db/schema.js";
-import { scheduleReservationExpiration } from "../queues/reservation.queue.js";
+export const eventSeatStatus = pgEnum("event_seat_status", [
+  "AVAILABLE",
+  "HELD",
+  "SOLD",
+]);
 
-const BATCH_SIZE = 100;
-const CLAIM_TIMEOUT_MS = 60 * 1000;
+export const reservationStatus = pgEnum("reservation_status", [
+  "PENDING",
+  "CONFIRMED",
+  "CANCELLED",
+  "EXPIRED",
+]);
 
-async function claimOutboxEvents() {
-  const now = new Date();
+/* ----------------------------- Users ----------------------------- */
 
-  const staleClaimTime = new Date(
-    Date.now() - CLAIM_TIMEOUT_MS
-  );
+export const users = pgTable("users", {
+  id: uuid("id").defaultRandom().primaryKey(),
 
-  return db.transaction(async (tx) => {
-    const events = await tx
-      .select()
-      .from(outboxEvents)
-      .where(
-        and(
-          isNull(outboxEvents.processedAt),
-          or(
-            isNull(outboxEvents.claimedAt),
-            lt(outboxEvents.claimedAt, staleClaimTime)
-          )
-        )
-      )
-      .limit(BATCH_SIZE)
-      .for("update", {
-        skipLocked: true,
-      });
+  name: varchar("name", {
+    length: 255,
+  }).notNull(),
 
-    for (const event of events) {
-      await tx
-        .update(outboxEvents)
-        .set({
-          claimedAt: now,
-        })
-        .where(eq(outboxEvents.id, event.id));
-    }
+  email: varchar("email", {
+    length: 255,
+  }).notNull().unique(),
 
-    return events;
-  });
-}
+  createdAt: timestamp("created_at")
+    .defaultNow()
+    .notNull(),
+});
 
-async function publishOutboxEvents() {
-  const events = await claimOutboxEvents();
+/* ----------------------------- Venues ----------------------------- */
 
-  console.log(`Claimed ${events.length} outbox events`);
+export const venues = pgTable("venues", {
+  id: uuid("id").defaultRandom().primaryKey(),
 
-  for (const event of events) {
-    try {
-      const payload = JSON.parse(event.payload);
+  name: varchar("name", {
+    length: 255,
+  }).notNull(),
 
-      if (event.type === "RESERVATION_EXPIRATION_SCHEDULED") {
-        await scheduleReservationExpiration(
-          payload.reservationId,
-          new Date(payload.expiresAt)
-        );
-      }
+  createdAt: timestamp("created_at")
+    .defaultNow()
+    .notNull(),
+});
 
-      await db
-        .update(outboxEvents)
-        .set({
-          processedAt: new Date(),
-        })
-        .where(eq(outboxEvents.id, event.id));
+/* ----------------------------- Seats ----------------------------- */
 
-      console.log(`Published outbox event ${event.id}`);
-    } catch (error) {
-      console.error(
-        `Failed to publish outbox event ${event.id}:`,
-        error
-      );
-    }
-  }
-}
+export const seats = pgTable(
+  "seats",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
 
-publishOutboxEvents()
-  .then(() => {
-    console.log("Outbox publisher finished");
-    process.exit(0);
+    venueId: uuid("venue_id")
+      .notNull()
+      .references(() => venues.id, {
+        onDelete: "cascade",
+      }),
+
+    section: varchar("section", {
+      length: 50,
+    }).notNull(),
+
+    row: varchar("row", {
+      length: 10,
+    }).notNull(),
+
+    seatNumber: integer("seat_number").notNull(),
+  },
+  (table) => ({
+    uniqueSeat: unique().on(
+      table.venueId,
+      table.section,
+      table.row,
+      table.seatNumber
+    ),
   })
-  .catch((error) => {
-    console.error("Outbox publisher failed:", error);
-    process.exit(1);
-  });
+);
+
+/* ----------------------------- Events ----------------------------- */
+
+export const events = pgTable("events", {
+  id: uuid("id").defaultRandom().primaryKey(),
+
+  name: varchar("name", {
+    length: 255,
+  }).notNull(),
+
+  venueId: uuid("venue_id")
+    .notNull()
+    .references(() => venues.id, {
+      onDelete: "cascade",
+    }),
+
+  startsAt: timestamp("starts_at").notNull(),
+
+  createdAt: timestamp("created_at")
+    .defaultNow()
+    .notNull(),
+});
+
+/* -------------------------- Event Seats -------------------------- */
+
+export const eventSeats = pgTable(
+  "event_seats",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => events.id, {
+        onDelete: "cascade",
+      }),
+
+    seatId: uuid("seat_id")
+      .notNull()
+      .references(() => seats.id, {
+        onDelete: "cascade",
+      }),
+
+    price: integer("price").notNull(),
+
+    status: eventSeatStatus("status")
+      .default("AVAILABLE")
+      .notNull(),
+
+    createdAt: timestamp("created_at")
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    uniqueEventSeat: unique().on(
+      table.eventId,
+      table.seatId
+    ),
+  })
+);
+
+/* -------------------------- Reservations -------------------------- */
+
+export const reservations = pgTable("reservations", {
+  id: uuid("id").defaultRandom().primaryKey(),
+
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, {
+      onDelete: "cascade",
+    }),
+
+  eventSeatId: uuid("event_seat_id")
+    .notNull()
+    .references(() => eventSeats.id, {
+      onDelete: "cascade",
+    }),
+
+  status: reservationStatus("status")
+    .default("PENDING")
+    .notNull(),
+
+  expiresAt: timestamp("expires_at"),
+
+  createdAt: timestamp("created_at")
+    .defaultNow()
+    .notNull(),
+
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .notNull(),
+});
+
+export const outboxEvents = pgTable("outbox_events", {
+  id: uuid("id").defaultRandom().primaryKey(),
+
+  type: varchar("type", { length: 100 }).notNull(),
+
+  payload: varchar("payload", { length: 1000 }).notNull(),
+
+  processedAt: timestamp("processed_at"),
+
+  claimedAt: timestamp("claimed_at"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const idempotencyKeys = pgTable(
+  "idempotency_keys",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    key: varchar("key", { length: 255 }).notNull(),
+
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, {
+        onDelete: "cascade",
+      }),
+
+    reservationId: uuid("reservation_id")
+      .references(() => reservations.id, {
+        onDelete: "cascade",
+      }),
+
+    createdAt: timestamp("created_at")
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    uniqueKeyPerUser: unique().on(
+      table.userId,
+      table.key
+    ),
+  })
+);

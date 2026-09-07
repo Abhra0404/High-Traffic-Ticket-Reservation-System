@@ -29,6 +29,13 @@
       "when": 1788760560968,
       "tag": "0003_slimy_tattoo",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788762485878,
+      "tag": "0004_nice_hulk",
+      "breakpoints": true
     }
   ]
 }

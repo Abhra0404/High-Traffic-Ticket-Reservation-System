@@ -1,19 +1,47 @@
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 
 import { db } from "../../db/index.js";
 import {
   eventSeats,
   reservations,
   outboxEvents,
+  idempotencyKeys,
 } from "../../db/schema.js";
 
 export async function createReservation({
   userId,
   eventSeatId,
+  idempotencyKey,
 }) {
-  const reservation = await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
+    // 1. Fast idempotency check
+    const existingKey = await tx
+      .select()
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.key, idempotencyKey)
+        )
+      )
+      .limit(1);
 
-    // 1. Lock the event seat
+    if (existingKey.length > 0) {
+      const existingReservation = await tx
+        .select()
+        .from(reservations)
+        .where(
+          eq(
+            reservations.id,
+            existingKey[0].reservationId
+          )
+        )
+        .limit(1);
+
+      return existingReservation[0];
+    }
+
+    // 2. Lock the seat
     const seatResult = await tx
       .select()
       .from(eventSeats)
@@ -26,16 +54,44 @@ export async function createReservation({
       throw new Error("Event seat not found");
     }
 
-    // 2. Check availability
+    // 3. Re-check idempotency AFTER acquiring lock
+    const retryKey = await tx
+      .select()
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.key, idempotencyKey)
+        )
+      )
+      .limit(1);
+
+    if (retryKey.length > 0) {
+      const existingReservation = await tx
+        .select()
+        .from(reservations)
+        .where(
+          eq(
+            reservations.id,
+            retryKey[0].reservationId
+          )
+        )
+        .limit(1);
+
+      return existingReservation[0];
+    }
+
+    // 4. Check seat availability
     if (seat.status !== "AVAILABLE") {
       throw new Error("Seat is not available");
     }
 
+    // 5. Create reservation expiry
     const expiresAt = new Date(
       Date.now() + 10 * 60 * 1000
     );
 
-    // 3. Hold the seat
+    // 6. Hold seat
     await tx
       .update(eventSeats)
       .set({
@@ -43,7 +99,7 @@ export async function createReservation({
       })
       .where(eq(eventSeats.id, eventSeatId));
 
-    // 4. Create reservation
+    // 7. Create reservation
     const [reservation] = await tx
       .insert(reservations)
       .values({
@@ -54,7 +110,16 @@ export async function createReservation({
       })
       .returning();
 
-    // 5. Create outbox event
+    // 8. Store idempotency key
+    await tx
+      .insert(idempotencyKeys)
+      .values({
+        key: idempotencyKey,
+        userId,
+        reservationId: reservation.id,
+      });
+
+    // 9. Create outbox event
     await tx
       .insert(outboxEvents)
       .values({
@@ -67,6 +132,4 @@ export async function createReservation({
 
     return reservation;
   });
-
-  return reservation;
 }
