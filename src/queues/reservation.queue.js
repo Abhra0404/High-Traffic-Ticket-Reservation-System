@@ -1,13 +1,6 @@
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 
-export const reservationQueue = new Queue(
-  "reservation-expiration",
-  {
-    connection: redis,
-  }
-);
-
 export async function scheduleReservationExpiration(
   reservationId,
   expiresAt
@@ -23,6 +16,7 @@ export async function scheduleReservationExpiration(
       reservationId,
     },
     {
+      jobId: `reservation-expiration-${reservationId}`,
       delay,
       attempts: 3,
       backoff: {

@@ -7,11 +7,14 @@ import { outboxEvents } from "../db/schema.js";
 import { scheduleReservationExpiration } from "../queues/reservation.queue.js";
 
 async function publishOutboxEvents() {
-  const events = await db
-    .select()
-    .from(outboxEvents)
-    .where(isNull(outboxEvents.processedAt))
-    .limit(100);
+  const events = await db.transaction(async (tx) => {
+    return tx
+      .select()
+      .from(outboxEvents)
+      .where(isNull(outboxEvents.processedAt))
+      .limit(100)
+      .for("update", { skipLocked: true });
+  });
 
   for (const event of events) {
     try {

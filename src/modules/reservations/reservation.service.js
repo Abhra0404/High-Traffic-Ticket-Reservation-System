@@ -7,10 +7,6 @@ import {
   outboxEvents,
 } from "../../db/schema.js";
 
-import {
-  scheduleReservationExpiration,
-} from "../../queues/reservation.queue.js";
-
 export async function createReservation({
   userId,
   eventSeatId,
@@ -71,12 +67,6 @@ export async function createReservation({
 
     return reservation;
   });
-
-  // Queue scheduling happens AFTER the DB transaction.
-  await scheduleReservationExpiration(
-    reservation.id,
-    reservation.expiresAt
-  );
 
   return reservation;
 }
