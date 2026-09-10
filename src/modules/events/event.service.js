@@ -11,6 +11,7 @@ import {
 import {
   getCachedSeats,
   cacheSeats,
+  getSeatsWithStampedeProtection,
 } from "../seats/seat.cache.js";
 
 export async function getAllEvents() {
@@ -47,25 +48,20 @@ export async function getEventById(eventId) {
 }
 
 export async function getEventSeats(eventId) {
-  // 1. Check Redis
-  const cachedSeats = await getCachedSeats(eventId);
-
-  if (cachedSeats) {
-    console.log("Seat cache HIT");
-
-    return cachedSeats;
-  }
-
-  console.log("Seat cache MISS");
-
-  // 2. Query PostgreSQL
-  const seats = await db
-    .select()
-    .from(eventSeats)
-    .where(eq(eventSeats.eventId, eventId));
-
-  // 3. Store result in Redis
-  await cacheSeats(eventId, seats);
-
-  return seats;
+  return getSeatsWithStampedeProtection(
+    eventId,
+    async () => {
+      return db
+        .select({
+          id: eventSeats.id,
+          seatId: eventSeats.seatId,
+          price: eventSeats.price,
+          status: eventSeats.status,
+        })
+        .from(eventSeats)
+        .where(
+          eq(eventSeats.eventId, eventId)
+        );
+    }
+  );
 }
