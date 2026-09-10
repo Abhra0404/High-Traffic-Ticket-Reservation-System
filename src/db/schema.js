@@ -6,6 +6,7 @@ import {
   timestamp,
   pgEnum,
   unique,
+  index,
 } from "drizzle-orm/pg-core";
 
 /* ----------------------------- Enums ----------------------------- */
@@ -144,6 +145,8 @@ export const eventSeats = pgTable(
       table.eventId,
       table.seatId
     ),
+    eventIdIdx: index("event_seats_event_id_idx")
+      .on(table.eventId),
   })
 );
 
@@ -177,7 +180,18 @@ export const reservations = pgTable("reservations", {
   updatedAt: timestamp("updated_at")
     .defaultNow()
     .notNull(),
-});
+  },
+  (table) => ({
+    userIdIdx: index("reservations_user_id_idx")
+      .on(table.userId),
+
+    statusIdx: index("reservations_status_idx")
+      .on(table.status),
+
+    expiresAtIdx: index("reservations_expires_at_idx")
+      .on(table.expiresAt),
+  })
+);
 
 export const outboxEvents = pgTable("outbox_events", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -191,7 +205,15 @@ export const outboxEvents = pgTable("outbox_events", {
   claimedAt: timestamp("claimed_at"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+},
+  (table) => ({
+    processedAtIdx: index("outbox_events_processed_at_idx")
+      .on(table.processedAt),
+
+    claimedAtIdx: index("outbox_events_claimed_at_idx")
+      .on(table.claimedAt),
+  })
+);
 
 export const idempotencyKeys = pgTable(
   "idempotency_keys",

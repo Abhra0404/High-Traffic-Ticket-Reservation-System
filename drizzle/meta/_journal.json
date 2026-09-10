@@ -36,6 +36,13 @@
       "when": 1788762485878,
       "tag": "0004_nice_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788772847154,
+      "tag": "0005_aspiring_apocalypse",
+      "breakpoints": true
     }
   ]
 }

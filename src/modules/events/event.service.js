@@ -8,6 +8,11 @@ import {
   seats,
 } from "../../db/schema.js";
 
+import {
+  getCachedSeats,
+  cacheSeats,
+} from "../seats/seat.cache.js";
+
 export async function getAllEvents() {
   return db
     .select({
@@ -42,20 +47,25 @@ export async function getEventById(eventId) {
 }
 
 export async function getEventSeats(eventId) {
-  return db
-    .select({
-      eventSeatId: eventSeats.id,
-      seatId: seats.id,
-      section: seats.section,
-      row: seats.row,
-      seatNumber: seats.seatNumber,
-      price: eventSeats.price,
-      status: eventSeats.status,
-    })
+  // 1. Check Redis
+  const cachedSeats = await getCachedSeats(eventId);
+
+  if (cachedSeats) {
+    console.log("Seat cache HIT");
+
+    return cachedSeats;
+  }
+
+  console.log("Seat cache MISS");
+
+  // 2. Query PostgreSQL
+  const seats = await db
+    .select()
     .from(eventSeats)
-    .innerJoin(
-      seats,
-      eq(eventSeats.seatId, seats.id)
-    )
     .where(eq(eventSeats.eventId, eventId));
+
+  // 3. Store result in Redis
+  await cacheSeats(eventId, seats);
+
+  return seats;
 }

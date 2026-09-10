@@ -5,9 +5,11 @@ import { eq } from "drizzle-orm";
 
 import { redis } from "./redis.js";
 import { db } from "../db/index.js";
+
 import {
   eventSeats,
   reservations,
+  outboxEvents,
 } from "../db/schema.js";
 
 const worker = new Worker(
@@ -20,20 +22,21 @@ const worker = new Worker(
     );
 
     await db.transaction(async (tx) => {
-      const result = await tx
+      // 1. Lock reservation
+      const reservationResult = await tx
         .select()
         .from(reservations)
         .where(eq(reservations.id, reservationId))
         .for("update");
 
-      const reservation = result[0];
+      const reservation = reservationResult[0];
 
       if (!reservation) {
         console.log("Reservation not found");
         return;
       }
 
-      // Idempotency check
+      // 2. Idempotency / state check
       if (reservation.status !== "PENDING") {
         console.log(
           `Reservation already ${reservation.status}`
@@ -41,6 +44,25 @@ const worker = new Worker(
         return;
       }
 
+      // 3. Lock event seat
+      const seatResult = await tx
+        .select()
+        .from(eventSeats)
+        .where(
+          eq(
+            eventSeats.id,
+            reservation.eventSeatId
+          )
+        )
+        .for("update");
+
+      const seat = seatResult[0];
+
+      if (!seat) {
+        throw new Error("Event seat not found");
+      }
+
+      // 4. Expire reservation
       await tx
         .update(reservations)
         .set({
@@ -49,12 +71,28 @@ const worker = new Worker(
         })
         .where(eq(reservations.id, reservationId));
 
+      // 5. Release seat
       await tx
         .update(eventSeats)
         .set({
           status: "AVAILABLE",
         })
-        .where(eq(eventSeats.id, reservation.eventSeatId));
+        .where(
+          eq(
+            eventSeats.id,
+            reservation.eventSeatId
+          )
+        );
+
+      // 6. Create cache invalidation event
+      await tx
+        .insert(outboxEvents)
+        .values({
+          type: "SEAT_CACHE_INVALIDATE",
+          payload: JSON.stringify({
+            eventId: seat.eventId,
+          }),
+        });
     });
 
     console.log(
@@ -77,4 +115,6 @@ worker.on("failed", (job, error) => {
   );
 });
 
-console.log("Reservation expiration worker started");
+console.log(
+  "Reservation expiration worker started"
+);

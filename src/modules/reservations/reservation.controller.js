@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { createReservation } from "./reservation.service.js";
+import {
+  createReservation,
+  confirmReservation,
+  cancelReservation,
+} from "./reservation.service.js";
 
 const reservationSchema = z.object({
   userId: z.string().uuid(),
@@ -38,6 +42,63 @@ export async function createReservationHandler(req, res) {
     });
   } catch (error) {
     console.error("RESERVATION ERROR:", error);
+
+    return res.status(409).json({
+      error: error.message,
+    });
+  }
+}
+
+export async function confirmReservationHandler(req, res) {
+  try {
+    const reservationId = req.params.id;
+
+    const userId = req.body.userId;
+
+    if (!reservationId || !userId) {
+      return res.status(400).json({
+        error: "reservationId and userId are required",
+      });
+    }
+
+    const reservation = await confirmReservation({
+      reservationId,
+      userId,
+    });
+
+    return res.status(200).json({
+      data: reservation,
+    });
+  } catch (error) {
+    console.error("CONFIRMATION ERROR:", error);
+
+    return res.status(409).json({
+      error: error.message,
+    });
+  }
+}
+
+export async function cancelReservationHandler(req, res) {
+  try {
+    const reservationId = req.params.id;
+    const { userId } = req.body;
+
+    if (!reservationId || !userId) {
+      return res.status(400).json({
+        error: "reservationId and userId are required",
+      });
+    }
+
+    const reservation = await cancelReservation({
+      reservationId,
+      userId,
+    });
+
+    return res.status(200).json({
+      data: reservation,
+    });
+  } catch (error) {
+    console.error("CANCELLATION ERROR:", error);
 
     return res.status(409).json({
       error: error.message,

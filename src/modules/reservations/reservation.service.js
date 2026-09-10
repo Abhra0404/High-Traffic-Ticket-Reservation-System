@@ -129,7 +129,189 @@ export async function createReservation({
           expiresAt: reservation.expiresAt,
         }),
       });
+    await tx
+    .insert(outboxEvents)
+    .values({
+      type: "SEAT_CACHE_INVALIDATE",
+      payload: JSON.stringify({
+        eventId: seat.eventId,
+      }),
+    });
 
     return reservation;
+  });
+}
+
+export async function confirmReservation({
+  reservationId,
+  userId,
+}) {
+  return db.transaction(async (tx) => {
+    // 1. Lock reservation
+    const reservationResult = await tx
+      .select()
+      .from(reservations)
+      .where(eq(reservations.id, reservationId))
+      .for("update");
+
+    const reservation = reservationResult[0];
+
+    if (!reservation) {
+      throw new Error("Reservation not found");
+    }
+
+    // 2. Verify ownership
+    if (reservation.userId !== userId) {
+      throw new Error("Reservation does not belong to user");
+    }
+
+    // 3. Reservation must be pending
+    if (reservation.status !== "PENDING") {
+      throw new Error(
+        `Reservation cannot be confirmed from ${reservation.status} state`
+      );
+    }
+
+    // 4. Check expiration
+    if (
+      reservation.expiresAt &&
+      reservation.expiresAt <= new Date()
+    ) {
+      throw new Error("Reservation has expired");
+    }
+
+    // 5. Lock seat
+    const seatResult = await tx
+      .select()
+      .from(eventSeats)
+      .where(
+        eq(eventSeats.id, reservation.eventSeatId)
+      )
+      .for("update");
+
+    const seat = seatResult[0];
+
+    if (!seat) {
+      throw new Error("Event seat not found");
+    }
+
+    // 6. Seat must still be held
+    if (seat.status !== "HELD") {
+      throw new Error("Seat is not held");
+    }
+
+    // 7. Confirm reservation
+    const [confirmedReservation] = await tx
+      .update(reservations)
+      .set({
+        status: "CONFIRMED",
+        updatedAt: new Date(),
+      })
+      .where(eq(reservations.id, reservationId))
+      .returning();
+
+    // 8. Mark seat as sold
+    await tx
+      .update(eventSeats)
+      .set({
+        status: "SOLD",
+      })
+      .where(eq(eventSeats.id, reservation.eventSeatId));
+
+    await tx
+    .insert(outboxEvents)
+    .values({
+      type: "SEAT_CACHE_INVALIDATE",
+      payload: JSON.stringify({
+        eventId: seat.eventId,
+      }),
+    });
+
+    return confirmedReservation;
+  });
+}
+
+export async function cancelReservation({
+  reservationId,
+  userId,
+}) {
+  return db.transaction(async (tx) => {
+    // 1. Lock reservation
+    const reservationResult = await tx
+      .select()
+      .from(reservations)
+      .where(eq(reservations.id, reservationId))
+      .for("update");
+
+    const reservation = reservationResult[0];
+
+    if (!reservation) {
+      throw new Error("Reservation not found");
+    }
+
+    // 2. Verify ownership
+    if (reservation.userId !== userId) {
+      throw new Error("Reservation does not belong to user");
+    }
+
+    // 3. Validate state
+    if (
+      reservation.status !== "PENDING" &&
+      reservation.status !== "CONFIRMED"
+    ) {
+      throw new Error(
+        `Reservation cannot be cancelled from ${reservation.status} state`
+      );
+    }
+
+    // 4. Lock seat
+    const seatResult = await tx
+      .select()
+      .from(eventSeats)
+      .where(
+        eq(eventSeats.id, reservation.eventSeatId)
+      )
+      .for("update");
+
+    const seat = seatResult[0];
+
+    if (!seat) {
+      throw new Error("Event seat not found");
+    }
+
+    // 5. Cancel reservation
+    const [cancelledReservation] = await tx
+      .update(reservations)
+      .set({
+        status: "CANCELLED",
+        updatedAt: new Date(),
+      })
+      .where(eq(reservations.id, reservationId))
+      .returning();
+
+    // 6. Release seat
+    await tx
+      .update(eventSeats)
+      .set({
+        status: "AVAILABLE",
+      })
+      .where(
+        eq(
+          eventSeats.id,
+          reservation.eventSeatId
+        )
+      );
+
+    // 7. Invalidate seat cache through outbox
+    await tx
+      .insert(outboxEvents)
+      .values({
+        type: "SEAT_CACHE_INVALIDATE",
+        payload: JSON.stringify({
+          eventId: seat.eventId,
+        }),
+      });
+
+    return cancelledReservation;
   });
 }

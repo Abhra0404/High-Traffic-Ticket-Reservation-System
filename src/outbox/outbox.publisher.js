@@ -4,7 +4,12 @@ import { and, eq, isNull, lt, or } from "drizzle-orm";
 
 import { db } from "../db/index.js";
 import { outboxEvents } from "../db/schema.js";
-import { scheduleReservationExpiration } from "../queues/reservation.queue.js";
+import {
+  scheduleReservationExpiration,
+} from "../queues/reservation.queue.js";
+import {
+  invalidateSeatCache,
+} from "../modules/seats/seat.cache.js";
 
 const BATCH_SIZE = 100;
 const CLAIM_TIMEOUT_MS = 60 * 1000;
@@ -26,7 +31,10 @@ async function claimOutboxEvents() {
           isNull(outboxEvents.processedAt),
           or(
             isNull(outboxEvents.claimedAt),
-            lt(outboxEvents.claimedAt, staleClaimTime)
+            lt(
+              outboxEvents.claimedAt,
+              staleClaimTime
+            )
           )
         )
       )
@@ -55,13 +63,27 @@ async function publishOutboxEvents() {
     try {
       const payload = JSON.parse(event.payload);
 
-      if (event.type === "RESERVATION_EXPIRATION_SCHEDULED") {
+      // Schedule reservation expiration
+      if (
+        event.type ===
+        "RESERVATION_EXPIRATION_SCHEDULED"
+      ) {
         await scheduleReservationExpiration(
           payload.reservationId,
           new Date(payload.expiresAt)
         );
       }
 
+      // Invalidate event seat cache
+      if (
+        event.type === "SEAT_CACHE_INVALIDATE"
+      ) {
+        await invalidateSeatCache(
+          payload.eventId
+        );
+      }
+
+      // Mark event as successfully processed
       await db
         .update(outboxEvents)
         .set({
@@ -69,7 +91,9 @@ async function publishOutboxEvents() {
         })
         .where(eq(outboxEvents.id, event.id));
 
-      console.log(`Published outbox event ${event.id}`);
+      console.log(
+        `Published outbox event ${event.id}`
+      );
     } catch (error) {
       console.error(
         `Failed to publish outbox event ${event.id}:`,
@@ -89,14 +113,22 @@ async function startPublisher() {
       const count = await publishOutboxEvents();
 
       if (count > 0) {
-        console.log(`Processed ${count} outbox events`);
+        console.log(
+          `Processed ${count} outbox events`
+        );
       }
     } catch (error) {
-      console.error("Outbox polling error:", error);
+      console.error(
+        "Outbox polling error:",
+        error
+      );
     }
 
     await new Promise((resolve) =>
-      setTimeout(resolve, POLL_INTERVAL_MS)
+      setTimeout(
+        resolve,
+        POLL_INTERVAL_MS
+      )
     );
   }
 }
