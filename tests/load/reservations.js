@@ -11,8 +11,8 @@ export const options = {
 
 const BASE_URL = "http://localhost:3000";
 
-const USER_ID = "d9ab9f46-f085-480b-9bbb-aa47f14339ca";
-const EVENT_ID = "64dad8ce-27a0-4aac-8ea5-0193e7e35bed";
+const USER_ID = "76b37253-0e0e-4c4f-8f49-a29abe9c4806";
+const EVENT_ID = "e0d4b62e-3971-4842-877a-994eeacadde5";
 
 export function setup() {
   const response = http.get(
@@ -63,7 +63,11 @@ export default function (data) {
   );
 
   check(response, {
-    "reservation accepted or rejected correctly": (r) =>
-      r.status === 201 || r.status === 409,
-  });
-}
+  "reservation accepted or rejected correctly": (r) => {
+    if (r.status !== 201 && r.status !== 409) {
+      console.log(`UNEXPECTED STATUS: ${r.status} BODY: ${r.body}`);
+    }
+
+    return r.status === 201 || r.status === 409;
+  },
+})}
