@@ -1,5 +1,5 @@
 import { eq, and } from "drizzle-orm";
-
+import { logger } from "../../utils/logger.js";
 import { db } from "../../db/index.js";
 import {
   eventSeats,
@@ -12,6 +12,7 @@ export async function createReservation({
   userId,
   eventSeatId,
   idempotencyKey,
+  requestId,
 }) {
   return db.transaction(async (tx) => {
     // 1. Fast idempotency check
@@ -78,6 +79,13 @@ export async function createReservation({
         )
         .limit(1);
 
+    logger.info("reservation_idempotent_replay", {
+        requestId,
+        userId,
+        eventSeatId,
+        reservationId: existingReservation.id,
+    });
+
       return existingReservation[0];
     }
 
@@ -136,6 +144,13 @@ export async function createReservation({
       payload: JSON.stringify({
         eventId: seat.eventId,
       }),
+    });
+    logger.info("reservation_created", {
+      requestId,
+      userId,
+      eventSeatId,
+      reservationId: reservation.id,
+      expiresAt: reservation.expiresAt,
     });
 
     return reservation;

@@ -35,6 +35,7 @@ export async function createReservationHandler(req, res) {
       userId: result.data.userId,
       eventSeatId: result.data.eventSeatId,
       idempotencyKey: idempotencyKey.trim(),
+      requestId: req.requestId,
     });
 
     return res.status(201).json({
