@@ -59,11 +59,12 @@ async function claimOutboxEvents() {
 async function publishOutboxEvents() {
   const events = await claimOutboxEvents();
 
+  let processedCount = 0;
+
   for (const event of events) {
     try {
       const payload = JSON.parse(event.payload);
 
-      // Schedule reservation expiration
       if (
         event.type ===
         "RESERVATION_EXPIRATION_SCHEDULED"
@@ -74,7 +75,6 @@ async function publishOutboxEvents() {
         );
       }
 
-      // Invalidate event seat cache
       if (
         event.type === "SEAT_CACHE_INVALIDATE"
       ) {
@@ -83,13 +83,14 @@ async function publishOutboxEvents() {
         );
       }
 
-      // Mark event as successfully processed
       await db
         .update(outboxEvents)
         .set({
           processedAt: new Date(),
         })
         .where(eq(outboxEvents.id, event.id));
+
+      processedCount++;
 
       console.log(
         `Published outbox event ${event.id}`
@@ -102,7 +103,7 @@ async function publishOutboxEvents() {
     }
   }
 
-  return events.length;
+  return processedCount;
 }
 
 async function startPublisher() {
