@@ -5,12 +5,20 @@ import {
   cancelReservation,
 } from "./reservation.service.js";
 
+import {
+  reservationAttemptsTotal,
+  reservationSuccessTotal,
+  reservationConflictsTotal,
+  reservationIdempotentReplaysTotal,
+} from "../../utils/reservation.metrics.js";
+
 const reservationSchema = z.object({
   userId: z.string().uuid(),
   eventSeatId: z.string().uuid(),
 });
 
 export async function createReservationHandler(req, res) {
+  reservationAttemptsTotal.inc();
   try {
     const result = reservationSchema.safeParse(req.body);
 
@@ -37,6 +45,9 @@ export async function createReservationHandler(req, res) {
       idempotencyKey: idempotencyKey.trim(),
       requestId: req.requestId,
     });
+
+    reservationSuccessTotal.inc();
+    reservationIdempotentReplaysTotal.inc();
 
     return res.status(201).json({
       data: reservation,
@@ -72,6 +83,8 @@ export async function confirmReservationHandler(req, res) {
     });
   } catch (error) {
     console.error("CONFIRMATION ERROR:", error);
+
+    reservationConflictsTotal.inc();
 
     return res.status(409).json({
       error: error.message,
