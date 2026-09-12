@@ -4,12 +4,13 @@ import { redis } from "./queues/redis.js";
 import { register } from "./utils/metrics.js";
 import { requestId } from "./middleware/request-id.js";
 import { requestLogger } from "./middleware/request-logger.js";
+import { errorHandler } from "./middleware/error-handler.js";
 import eventRoutes from "./modules/events/event.routes.js";
 import reservationRoutes from "./modules/reservations/reservation.routes.js";
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 app.use(requestId);
 app.use(requestLogger);
 
@@ -59,5 +60,7 @@ app.get("/metrics", async (req, res) => {
     res.status(500).end();
   }
 });
+
+app.use(errorHandler);
 
 export default app;

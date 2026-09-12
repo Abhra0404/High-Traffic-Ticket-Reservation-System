@@ -1,10 +1,9 @@
-import "dotenv/config";
-
 import app from "./app.js";
 import { closeDatabase } from "./db/index.js";
 import { redis } from "./queues/redis.js";
+import { env } from "./config/env.js";
 
-const PORT = process.env.PORT || 3000;
+const PORT = env.PORT;
 
 const server = app.listen(PORT, () => {
   console.log(

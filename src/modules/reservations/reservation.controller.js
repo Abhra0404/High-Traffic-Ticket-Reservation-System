@@ -31,8 +31,6 @@ export async function createReservationHandler(req, res) {
 
     const idempotencyKey = req.get("Idempotency-Key");
 
-    console.log("HEADER:", JSON.stringify(idempotencyKey));
-
     if (!idempotencyKey || idempotencyKey.trim() === "") {
       return res.status(400).json({
         error: "Idempotency-Key header is required",
@@ -47,7 +45,6 @@ export async function createReservationHandler(req, res) {
     });
 
     reservationSuccessTotal.inc();
-    reservationIdempotentReplaysTotal.inc();
 
     return res.status(201).json({
       data: reservation,

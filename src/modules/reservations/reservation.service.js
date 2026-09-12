@@ -1,4 +1,5 @@
 import { eq, and } from "drizzle-orm";
+
 import { logger } from "../../utils/logger.js";
 import { db } from "../../db/index.js";
 import {
@@ -39,6 +40,23 @@ export async function createReservation({
         )
         .limit(1);
 
+      // Same idempotency key, different request
+      if (
+        existingReservation.length > 0 &&
+        existingReservation[0].eventSeatId !== eventSeatId
+      ) {
+        throw new Error(
+          "Idempotency key was already used with a different request"
+        );
+      }
+
+      logger.info("reservation_idempotent_replay", {
+        requestId,
+        userId,
+        eventSeatId,
+        reservationId: existingReservation[0]?.id,
+      });
+
       return existingReservation[0];
     }
 
@@ -56,6 +74,9 @@ export async function createReservation({
     }
 
     // 3. Re-check idempotency AFTER acquiring lock
+    //
+    // This protects against concurrent requests using
+    // the same idempotency key.
     const retryKey = await tx
       .select()
       .from(idempotencyKeys)
@@ -79,12 +100,22 @@ export async function createReservation({
         )
         .limit(1);
 
-    logger.info("reservation_idempotent_replay", {
+      // Same idempotency key, different request
+      if (
+        existingReservation.length > 0 &&
+        existingReservation[0].eventSeatId !== eventSeatId
+      ) {
+        throw new Error(
+          "Idempotency key was already used with a different request"
+        );
+      }
+
+      logger.info("reservation_idempotent_replay", {
         requestId,
         userId,
         eventSeatId,
-        reservationId: existingReservation.id,
-    });
+        reservationId: existingReservation[0]?.id,
+      });
 
       return existingReservation[0];
     }
@@ -94,12 +125,12 @@ export async function createReservation({
       throw new Error("Seat is not available");
     }
 
-    // 5. Create reservation expiry
+    // 5. Calculate reservation expiration
     const expiresAt = new Date(
       Date.now() + 10 * 60 * 1000
     );
 
-    // 6. Hold seat
+    // 6. Mark seat as HELD
     await tx
       .update(eventSeats)
       .set({
@@ -108,7 +139,7 @@ export async function createReservation({
       .where(eq(eventSeats.id, eventSeatId));
 
     // 7. Create reservation
-    const [reservation] = await tx
+    const reservationResult = await tx
       .insert(reservations)
       .values({
         userId,
@@ -117,6 +148,8 @@ export async function createReservation({
         expiresAt,
       })
       .returning();
+
+    const reservation = reservationResult[0];
 
     // 8. Store idempotency key
     await tx
@@ -127,30 +160,33 @@ export async function createReservation({
         reservationId: reservation.id,
       });
 
-    // 9. Create outbox event
+    // 9. Create outbox event for expiration scheduling
     await tx
       .insert(outboxEvents)
       .values({
         type: "RESERVATION_EXPIRATION_SCHEDULED",
         payload: JSON.stringify({
           reservationId: reservation.id,
-          expiresAt: reservation.expiresAt,
+          expiresAt: expiresAt.toISOString(),
         }),
       });
+
+    // 10. Create outbox event for seat cache invalidation
     await tx
-    .insert(outboxEvents)
-    .values({
-      type: "SEAT_CACHE_INVALIDATE",
-      payload: JSON.stringify({
-        eventId: seat.eventId,
-      }),
-    });
+      .insert(outboxEvents)
+      .values({
+        type: "SEAT_CACHE_INVALIDATE",
+        payload: JSON.stringify({
+          eventId: seat.eventId,
+        }),
+      });
+
     logger.info("reservation_created", {
       requestId,
       userId,
       eventSeatId,
       reservationId: reservation.id,
-      expiresAt: reservation.expiresAt,
+      expiresAt: expiresAt.toISOString(),
     });
 
     return reservation;
@@ -177,10 +213,10 @@ export async function confirmReservation({
 
     // 2. Verify ownership
     if (reservation.userId !== userId) {
-      throw new Error("Reservation does not belong to user");
+      throw new Error("Unauthorized");
     }
 
-    // 3. Reservation must be pending
+    // 3. Check reservation state
     if (reservation.status !== "PENDING") {
       throw new Error(
         `Reservation cannot be confirmed from ${reservation.status} state`
@@ -195,7 +231,7 @@ export async function confirmReservation({
       throw new Error("Reservation has expired");
     }
 
-    // 5. Lock seat
+    // 5. Lock event seat
     const seatResult = await tx
       .select()
       .from(eventSeats)
@@ -210,13 +246,13 @@ export async function confirmReservation({
       throw new Error("Event seat not found");
     }
 
-    // 6. Seat must still be held
+    // 6. Verify seat is still held
     if (seat.status !== "HELD") {
       throw new Error("Seat is not held");
     }
 
     // 7. Confirm reservation
-    const [confirmedReservation] = await tx
+    const updatedReservationResult = await tx
       .update(reservations)
       .set({
         status: "CONFIRMED",
@@ -225,7 +261,7 @@ export async function confirmReservation({
       .where(eq(reservations.id, reservationId))
       .returning();
 
-    // 8. Mark seat as sold
+    // 8. Mark seat as SOLD
     await tx
       .update(eventSeats)
       .set({
@@ -233,16 +269,23 @@ export async function confirmReservation({
       })
       .where(eq(eventSeats.id, reservation.eventSeatId));
 
+    // 9. Invalidate seat cache through outbox
     await tx
-    .insert(outboxEvents)
-    .values({
-      type: "SEAT_CACHE_INVALIDATE",
-      payload: JSON.stringify({
-        eventId: seat.eventId,
-      }),
+      .insert(outboxEvents)
+      .values({
+        type: "SEAT_CACHE_INVALIDATE",
+        payload: JSON.stringify({
+          eventId: seat.eventId,
+        }),
+      });
+
+    logger.info("reservation_confirmed", {
+      userId,
+      reservationId,
+      eventSeatId: reservation.eventSeatId,
     });
 
-    return confirmedReservation;
+    return updatedReservationResult[0];
   });
 }
 
@@ -266,10 +309,10 @@ export async function cancelReservation({
 
     // 2. Verify ownership
     if (reservation.userId !== userId) {
-      throw new Error("Reservation does not belong to user");
+      throw new Error("Unauthorized");
     }
 
-    // 3. Validate state
+    // 3. Check reservation state
     if (
       reservation.status !== "PENDING" &&
       reservation.status !== "CONFIRMED"
@@ -279,7 +322,7 @@ export async function cancelReservation({
       );
     }
 
-    // 4. Lock seat
+    // 4. Lock event seat
     const seatResult = await tx
       .select()
       .from(eventSeats)
@@ -295,7 +338,7 @@ export async function cancelReservation({
     }
 
     // 5. Cancel reservation
-    const [cancelledReservation] = await tx
+    const updatedReservationResult = await tx
       .update(reservations)
       .set({
         status: "CANCELLED",
@@ -304,18 +347,13 @@ export async function cancelReservation({
       .where(eq(reservations.id, reservationId))
       .returning();
 
-    // 6. Release seat
+    // 6. Make seat available again
     await tx
       .update(eventSeats)
       .set({
         status: "AVAILABLE",
       })
-      .where(
-        eq(
-          eventSeats.id,
-          reservation.eventSeatId
-        )
-      );
+      .where(eq(eventSeats.id, reservation.eventSeatId));
 
     // 7. Invalidate seat cache through outbox
     await tx
@@ -327,6 +365,12 @@ export async function cancelReservation({
         }),
       });
 
-    return cancelledReservation;
+    logger.info("reservation_cancelled", {
+      userId,
+      reservationId,
+      eventSeatId: reservation.eventSeatId,
+    });
+
+    return updatedReservationResult[0];
   });
 }
