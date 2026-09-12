@@ -1,310 +1,333 @@
 # High-Traffic Ticket Reservation System
 
-A production-oriented ticket reservation backend built to handle **high traffic, concurrent bookings, and sudden traffic spikes** while maintaining strict inventory consistency.
+A concurrency-safe ticket reservation backend designed to handle high traffic while preventing double-booking and maintaining reliable asynchronous workflows.
 
-The project focuses on backend engineering and distributed-systems concepts rather than frontend development.
+The project focuses on a realistic reservation problem:
 
-## Overview
+> How do you safely allocate limited inventory when hundreds of clients attempt to reserve the same resources concurrently?
 
-Ticket reservation systems face a fundamental challenge:
+## Highlights
 
-> Many users may attempt to reserve the same limited inventory simultaneously.
+- PostgreSQL transactions and row-level locking
+- Double-booking prevention under high contention
+- Idempotent reservation requests
+- Redis seat caching
+- Redis cache-stampede protection
+- Redis-backed rate limiting
+- BullMQ delayed expiration jobs
+- Transactional Outbox pattern
+- Graceful shutdown and dependency readiness checks
+- Structured logging with request IDs
+- Prometheus metrics and Grafana dashboards
+- k6 load testing
+- PostgreSQL, Redis, API, and worker failure testing
 
-The system must prevent:
-
-* Double booking
-* Overselling
-* Race conditions
-* Duplicate requests
-* Inconsistent reservation states
-
-while remaining performant under heavy traffic.
-
-The project starts as a modular backend and progressively evolves into a scalable distributed architecture.
+---
 
 ## Architecture
 
-### Initial Architecture
+```text
+                         Client
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   Express    │
+                    │     API      │
+                    └──────┬───────┘
+                           │
+                 ┌─────────┴─────────┐
+                 ▼                   ▼
+            Reservation            Events
+               Service
+                 │
+        ┌────────┼────────┐
+        ▼        ▼        ▼
+   PostgreSQL  Redis    Outbox
+        │        │        │
+        │        │        ▼
+        │        │      BullMQ
+        │        │        │
+        │        │        ▼
+        │        │   Expiration Worker
+        │        │
+        └────────┴───────────────┐
+                                 ▼
+                            Observability
+                           Prometheus/Grafana
+````
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the detailed design.
+
+---
+
+## Core Reservation Flow
 
 ```text
-                    Client
-                      │
-                      ▼
-                ┌───────────┐
-                │  Express  │
-                │    API    │
-                └─────┬─────┘
-                      │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-       Events       Seats    Reservations
-          │           │           │
-          └───────────┼───────────┘
-                      ▼
-                 PostgreSQL
+Request
+   │
+   ▼
+Validate request
+   │
+   ▼
+Check Idempotency-Key
+   │
+   ▼
+Lock event seat
+   │
+   ▼
+Check availability
+   │
+   ▼
+Seat → HELD
+   │
+   ▼
+Reservation → PENDING
+   │
+   ├── Idempotency record
+   ├── Expiration outbox event
+   └── Cache invalidation event
+   │
+   ▼
+Commit transaction
 ```
 
-### Target Architecture
+PostgreSQL is the source of truth for seat ownership.
 
-```text
-                     Clients
-                        │
-                        ▼
-                 Load Balancer
-                        │
-              ┌─────────┼─────────┐
-              ▼         ▼         ▼
-            API-1     API-2     API-3
-              │         │         │
-              └─────────┼─────────┘
-                        ▼
-                      Redis
-                        │
-              ┌─────────┼─────────┐
-              ▼         ▼         ▼
-       Reservation    Event      Payment
-          Logic       Logic       Logic
-              │
-              ▼
-          PostgreSQL
-              │
-              ▼
-          BullMQ Queue
-              │
-        ┌─────┼─────┐
-        ▼     ▼     ▼
-     Workers Workers Workers
-```
+Row-level locking ensures that concurrent requests targeting the same seat cannot both successfully reserve it.
 
-The architecture will evolve gradually as scalability and consistency requirements increase.
-
-## Core Features
-
-* Event management
-* Seat inventory management
-* Ticket reservations
-* Temporary seat holds
-* Reservation expiration
-* Concurrent booking protection
-* Database transactions
-* Idempotent requests
-* Redis caching and coordination
-* Background job processing
-* Rate limiting
-* Retry and failure handling
-* Load testing
-* Metrics and observability
-
-## Tech Stack
-
-| Layer        | Technology           |
-| ------------ | -------------------- |
-| Language     | JavaScript           |
-| Runtime      | Node.js              |
-| Framework    | Express.js           |
-| Database     | PostgreSQL           |
-| ORM          | Drizzle ORM          |
-| Cache        | Redis                |
-| Queue        | BullMQ               |
-| Validation   | Zod                  |
-| Containers   | Docker               |
-| Load Testing | k6                   |
-| Testing      | Vitest               |
-| Monitoring   | Prometheus + Grafana |
-
-## Project Structure
-
-```text
-src/
-├── config/
-│
-├── db/
-│   ├── index.js
-│   └── schema.js
-│
-├── modules/
-│   ├── events/
-│   ├── seats/
-│   ├── reservations/
-│   └── users/
-│
-├── middleware/
-├── utils/
-│
-└── server.js
-
-tests/
-```
-
-The application initially follows a **modular monolith architecture**. Each domain is separated into modules while remaining part of the same Node.js application.
+---
 
 ## Reservation Lifecycle
 
 ```text
 AVAILABLE
     │
+    │ reserve
     ▼
   HELD
-    │
-    ├── Payment Failed ──► AVAILABLE
-    │
-    └── Payment Success
-             │
-             ▼
-           SOLD
+  /   \
+ /     \
+EXPIRED  CONFIRMED
+   │        │
+   ▼        │ cancel
+AVAILABLE   ▼
+          CANCELLED
+              │
+              ▼
+          AVAILABLE
 ```
 
-A temporary hold prevents another user from acquiring the seat while payment is being processed.
+Temporary reservations expire after 10 minutes.
 
-## Concurrency Challenge
+BullMQ delayed jobs perform expiration asynchronously.
 
-The central engineering problem:
+---
+
+## Reliability
+
+The system uses the Transactional Outbox pattern:
 
 ```text
-User A ──┐
-User B ──┤
-User C ──┼──► Seat A12
-User D ──┤
-User E ──┘
+Database Transaction
+       │
+       ├── Reservation
+       ├── Idempotency Key
+       └── Outbox Event
+              │
+              ▼
+           COMMIT
+              │
+              ▼
+       Outbox Publisher
+              │
+              ▼
+           BullMQ
 ```
 
-Even if thousands of requests arrive simultaneously:
+This prevents asynchronous work from being lost if the publisher or API process fails after the database transaction commits.
+
+---
+
+## Idempotency
+
+Every reservation requires an `Idempotency-Key`.
+
+The system guarantees:
 
 ```text
-Successful reservations = 1
-Duplicate reservations  = 0
-Overselling             = 0
+Same key + same request
+        ↓
+Return original reservation
+
+Same key + different request
+        ↓
+409 Conflict
 ```
 
-The project will investigate:
+Concurrent requests using the same key are handled safely and produce a single reservation.
 
-* Database transactions
-* Row-level locking
-* Isolation levels
-* Optimistic concurrency
-* Pessimistic concurrency
-* Redis-based coordination
+---
 
-## High-Traffic Testing
+## Redis
 
-The system will be tested under progressively increasing workloads:
+Redis is used for:
 
-```text
-Normal Traffic
-      │
-      ▼
-Traffic Spike
-      │
-      ▼
-Flash Sale
-      │
-      ▼
-Massive Concurrent Booking
-      │
-      ▼
-Failure + Recovery
-```
-
-Key metrics:
-
-* Requests/sec
-* p50 latency
-* p95 latency
-* p99 latency
-* Error rate
-* Database utilization
-* Redis throughput
-* Queue latency
-* Worker throughput
-
-## Failure Scenarios
-
-The system will intentionally be tested against:
-
-* Duplicate requests
-* Concurrent reservations
-* Worker crashes
-* Database failures
-* Redis failures
-* Payment failures
-* Network timeouts
-* Message retries
-* Expired reservations
-* Partial transaction completion
-
-The goal is to make the system **correct under failure**, not simply fast under normal conditions.
-
-## Development Roadmap
-
-### V1 — Core Reservation Engine
-
-* Project setup
-* Express API
-* PostgreSQL
-* Database schema
-* Events
-* Seats
-* Reservations
-* Basic transactions
-
-### V2 — Concurrency & Consistency
-
-* Race-condition testing
-* Row-level locking
-* Transaction isolation
-* Double-booking prevention
-* Concurrent load tests
-
-### V3 — Redis
-
-* Redis integration
-* Seat holds
-* Expiration
-* Caching
+* Seat availability caching
+* Cache-stampede protection
 * Rate limiting
 
-### V4 — Asynchronous Processing
+Redis is **not** the authoritative source for ticket ownership.
 
+Seat allocation remains protected by PostgreSQL transactions and row locks.
+
+---
+
+## Observability
+
+The API exposes:
+
+```text
+GET /metrics
+```
+
+Prometheus collects:
+
+* HTTP request rate
+* HTTP latency
+* HTTP errors
+* Reservation attempts
+* Reservation successes
+* Reservation conflicts
+* Idempotent replays
+
+Grafana is used to visualize the metrics.
+
+Every request also receives an `X-Request-ID` for tracing through structured logs.
+
+---
+
+## Performance
+
+Selected local benchmark results:
+
+| Test                                |         Result |
+| ----------------------------------- | -------------: |
+| Lightweight endpoint @ 1,000 VUs    |   ~9,830 req/s |
+| Seat reads @ 200 VUs                |   ~1,931 req/s |
+| Seat reads @ 500 VUs                |   ~4,092 req/s |
+| Seat reads @ 1,000 VUs              |   ~4,508 req/s |
+| Seat read errors @ 1,000 VUs        |             0% |
+| Reservation throughput @ 100 VUs    |     ~533 req/s |
+| Reservation p95 @ 100 VUs           |         ~78 ms |
+| 500 concurrent requests / 100 seats | 100 successful |
+| Cache stampede p95 improvement      |           ~36% |
+
+Detailed methodology and results are available in [LOAD_TESTING.md](./LOAD_TESTING.md).
+
+---
+
+## Failure Testing
+
+The system has been tested against:
+
+| Failure                  | Recovery                                       |
+| ------------------------ | ---------------------------------------------- |
+| PostgreSQL unavailable   | Readiness detects failure and recovers         |
+| Redis unavailable        | Readiness detects failure and Redis reconnects |
+| API process stopped      | Persisted reservation state survives           |
+| Outbox publisher stopped | Pending events are processed after recovery    |
+
+Detailed reproduction commands are available in [FAILURE_TESTING.md](./FAILURE_TESTING.md).
+
+---
+
+## Tech Stack
+
+### Backend
+
+* Node.js
+* Express.js
+* JavaScript / ES Modules
+
+### Database
+
+* PostgreSQL
+* Drizzle ORM
+
+### Infrastructure
+
+* Redis
 * BullMQ
-* Background workers
-* Payment processing
-* Notifications
-* Retries
-* Dead-letter handling
+* Docker Compose
 
-### V5 — High-Traffic Architecture
+### Validation & Testing
 
-* Horizontal API scaling
-* Load balancing
-* Database optimization
-* Connection pooling
-* Hot-inventory handling
+* Zod
+* k6
 
-### V6 — Production Engineering
+### Observability
 
-* Idempotency
-* Outbox pattern
-* Failure recovery
-* Observability
 * Prometheus
 * Grafana
-* Comprehensive load testing
+* Structured logging
 
-## Running Locally
+---
 
-### Install dependencies
+## Project Structure
+
+```text
+src/
+├── config/
+├── db/
+├── modules/
+│   ├── events/
+│   ├── seats/
+│   ├── reservations/
+│   └── users/
+├── queues/
+├── outbox/
+├── middleware/
+├── utils/
+├── app.js
+└── server.js
+
+tests/
+└── load/
+
+monitoring/
+└── prometheus.yml
+
+README.md
+ARCHITECTURE.md
+PLAN.md
+LOAD_TESTING.md
+FAILURE_TESTING.md
+```
+
+---
+
+## Local Setup
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Abhra0404/High-Traffic-Ticket-Reservation-System
+cd high-traffic-ticket-system
+```
+
+### 2. Install dependencies
 
 ```bash
 npm install
 ```
 
-### Start infrastructure
+### 3. Start infrastructure
 
 ```bash
 docker compose up -d
 ```
 
-### Configure environment
+### 4. Configure environment
 
 Create `.env`:
 
@@ -312,37 +335,161 @@ Create `.env`:
 NODE_ENV=development
 PORT=3000
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticket_system
+REDIS_URL=redis://localhost:6379
 ```
 
-### Run migrations
+### 5. Run database migrations
 
 ```bash
-npm run db:generate
 npm run db:migrate
 ```
 
-### Start the server
+### 6. Seed the database
+
+```bash
+npm run db:seed
+```
+
+### 7. Start the API
 
 ```bash
 npm run dev
 ```
 
-Health check:
+API:
 
-```bash
-curl http://localhost:3000/health
+```text
+http://localhost:3000
 ```
 
-## Engineering Philosophy
+---
 
-The system will not begin with a complex distributed architecture.
+## Useful Commands
 
-Each component will be introduced when a measurable problem requires it:
+### Start infrastructure
 
-**Correctness → Concurrency → Performance → Scalability → Fault Tolerance**
+```bash
+docker compose up -d
+```
 
-This makes the project an engineering experiment rather than a collection of technologies.
+### Stop infrastructure
+
+```bash
+docker compose down
+```
+
+### Start API
+
+```bash
+npm run dev
+```
+
+### Start Outbox publisher
+
+```bash
+npm run outbox
+```
+
+### Database seed
+
+```bash
+npm run db:seed
+```
+
+### Database migrations
+
+```bash
+npm run db:migrate
+```
+
+### Database studio
+
+```bash
+npm run db:studio
+```
+
+### Run tests
+
+```bash
+npm test
+```
+
+### View containers
+
+```bash
+docker ps
+```
+
+---
+
+## API Endpoints
+
+### Events
+
+```text
+GET /api/events
+GET /api/events/:id
+GET /api/events/:id/seats
+```
+
+### Reservations
+
+```text
+POST /api/reservations
+POST /api/reservations/:id/confirm
+POST /api/reservations/:id/cancel
+```
+
+### Health
+
+```text
+GET /health/live
+GET /health/ready
+```
+
+### Metrics
+
+```text
+GET /metrics
+```
+
+---
+
+## Documentation
+
+* [Architecture](./ARCHITECTURE.md)
+* [Project Plan](./PLAN.md)
+* [Load Testing](./LOAD_TESTING.md)
+* [Failure Testing](./FAILURE_TESTING.md)
+
+---
+
+## Design Philosophy
+
+The system deliberately avoids premature distributed-system complexity.
+
+The implementation follows:
+
+```text
+Correctness
+     ↓
+Concurrency
+     ↓
+Performance
+     ↓
+Scalability
+     ↓
+Fault Tolerance
+```
+
+Technologies such as Kafka, Kubernetes, microservices, and cloud deployment are considered future evolution rather than requirements for the current system.
+
+See [PLAN.md](./PLAN.md) for the roadmap.
+
+---
 
 ## License
 
-MIT
+This project is licensed under the MIT License.
+
+> Stay focused, stay productive, and keep leveling up! — kaizenX out. ✌️
